@@ -751,18 +751,17 @@ function renderEtfTable() {
         ${e.isin ? `<div style="font-size:10px;color:var(--text3)">${e.isin}</div>` : ''}
         ${e.notizen ? `<div style="font-size:10px;color:var(--accent2)">${e.notizen}</div>` : ''}
         <div class="ist-mobile" style="display:none;margin-top:5px">
-          <span style="font-size:10px;color:var(--text3)">IST: </span>
           <span class="ist-val-inline" data-id="${e.id}" onclick="inlineEditIst('${e.id}',this)" style="font-size:12px;color:var(--accent);cursor:pointer;border-bottom:1px dashed var(--accent3)">${fe(ist)}</span>
-          <span style="font-size:10px;color:var(--text3);margin-left:8px">Soll: </span>
-          <span style="font-size:12px;color:var(--green)">${sollPct ? sollPct.toFixed(1)+'%' : '—'}</span>
+          <span style="font-size:11px;color:var(--text);margin-left:8px">${istPct.toFixed(1)}%</span>
+          <span style="font-size:11px;color:var(--green);margin-left:4px">▸ ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</span>
         </div>
       </td>
       <td class="r ist-desktop">
         <span class="ist-val-inline" data-id="${e.id}" onclick="inlineEditIst('${e.id}',this)" style="cursor:pointer;border-bottom:1px dashed var(--accent3);padding-bottom:1px" title="Klicken zum Bearbeiten">${fe(ist)}</span>
       </td>
       <td class="r ist-desktop">
-        <div style="font-size:11px;color:var(--text)">${istPct.toFixed(1)}%</div>
-        <div style="font-size:10px;color:var(--green)">Soll: ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</div>
+        <div style="font-size:12px;color:var(--text);font-weight:500">${istPct.toFixed(1)}%</div>
+        <div style="font-size:11px;color:var(--green);margin-top:2px">▸ ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</div>
       </td>
       <td class="r">${abwBadge}</td>
       <td class="r">
@@ -961,43 +960,59 @@ function renderRebalance() {
 }
 
 // ══════════════════════════════════════════
-// KERN-BERECHNUNG: Betrag optimal aufteilen
-// Gibt Array zurück: [{etf, invest, istPct, sollPct, neueIstPct}]
-// Logik: Untergewichtete proportional zur Lücke (sollPct - istPct) befüllen
+// KERN: Betrag X optimal verteilen
+// Formel: x_i = soll_i * (G+X) - ist_i fuer alle ETFs
+// Falls x_i < 0 (uebergewichtet): x_i = 0, skaliere Rest
+// Input: betrag, optionale werte-Liste (default: etfs)
+// Output: [{...etf, invest, istPctVorher, istPctNachher, sollPct}]
 // ══════════════════════════════════════════
-function verteileOptimal(betrag) {
-  const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
-  const etfsMitSoll = etfs.filter(e => (e.soll_prozent || 0) > 0);
-  if (!etfsMitSoll.length) return null;
+function verteileOptimal(betrag, werte) {
+  const W = (werte || etfs).filter(e => (e.soll_prozent || 0) > 0);
+  if (!W.length || betrag <= 0) return null;
+  const G = W.reduce((s, e) => s + (e.ist_wert || 0), 0);
+  const neuerGesamt = G + betrag;
 
-  const items = etfsMitSoll.map(e => {
-    const ist = e.ist_wert || 0;
-    const istPct = istGesamt > 0 ? ist / istGesamt * 100 : 0;
-    const sollPct = e.soll_prozent * 100; // soll_prozent ist 0..1 in DB, z.B. 0.43 = 43%
-    const luecke = Math.max(0, sollPct - istPct);
-    return { ...e, ist, istPct, sollPct, luecke };
-  });
+  // Berechne ideale x_i = soll_i * neuerGesamt - ist_i
+  // Iterativ: wenn negativ -> 0 setzen, skaliere verbleibende
+  let aktiv = W.map(e => ({ ...e }));
+  let fixes = {};
 
-  const untergewichtet = items.filter(e => e.luecke > 0.01);
-  const gesamtLuecke = untergewichtet.reduce((s, e) => s + e.luecke, 0);
-
-  if (gesamtLuecke < 0.01) {
-    // Ausgeglichen: nach Soll-% verteilen
-    const gesamtSoll = items.reduce((s, e) => s + e.soll_prozent, 0);
-    return items.map(e => {
-      const invest = betrag * (e.soll_prozent / gesamtSoll);
-      const neuerIst = e.ist + invest;
-      const neueIstPct = (istGesamt + betrag) > 0 ? neuerIst / (istGesamt + betrag) * 100 : e.sollPct;
-      return { ...e, invest, neueIstPct, ausgeglichen: true };
+  for (let iter = 0; iter < 30; iter++) {
+    // Berechne x_i fuer aktive ETFs
+    const vorschlag = {};
+    aktiv.forEach(e => {
+      vorschlag[e.id] = e.soll_prozent * neuerGesamt - (e.ist_wert || 0);
     });
+    // Gibt es negative?
+    const neg = aktiv.filter(e => vorschlag[e.id] < 0);
+    if (!neg.length) break;
+    // Setze negative auf 0 (kein Verkauf), entferne aus aktiv
+    neg.forEach(e => { fixes[e.id] = 0; });
+    aktiv = aktiv.filter(e => vorschlag[e.id] >= 0);
+    if (!aktiv.length) break;
   }
 
-  return items.map(e => {
-    if (e.luecke <= 0.01) return { ...e, invest: 0, neueIstPct: (istGesamt + betrag) > 0 ? e.ist / (istGesamt + betrag) * 100 : e.istPct };
-    const invest = betrag * (e.luecke / gesamtLuecke);
-    const neuerIst = e.ist + invest;
-    const neueIstPct = (istGesamt + betrag) > 0 ? neuerIst / (istGesamt + betrag) * 100 : e.sollPct;
-    return { ...e, invest, neueIstPct };
+  // Finale x_i fuer aktive ETFs berechnen
+  const aktivInvest = {};
+  aktiv.forEach(e => {
+    aktivInvest[e.id] = e.soll_prozent * neuerGesamt - (e.ist_wert || 0);
+  });
+
+  // Skaliere so dass Summe exakt = betrag
+  const sumAktiv = aktiv.reduce((s, e) => s + Math.max(0, aktivInvest[e.id]), 0);
+  const scale = sumAktiv > 0 ? betrag / sumAktiv : 0;
+
+  // Baue Ergebnisliste fuer ALLE ETFs mit Soll
+  return W.map(e => {
+    const istVorher = e.ist_wert || 0;
+    const istPctVorher = G > 0 ? istVorher / G * 100 : 0;
+    const sollPct = e.soll_prozent * 100;
+    const invest = fixes[e.id] !== undefined
+      ? 0
+      : Math.max(0, aktivInvest[e.id] || 0) * scale;
+    const istNachher = istVorher + invest;
+    const istPctNachher = neuerGesamt > 0 ? istNachher / neuerGesamt * 100 : sollPct;
+    return { ...e, invest, istPctVorher, istPctNachher, sollPct };
   });
 }
 
@@ -1012,42 +1027,46 @@ function calcEinmal() {
   const items = verteileOptimal(betrag);
   if (!items) { box.innerHTML = '<div style="color:var(--text3);padding:10px;font-size:12px">Bitte zuerst ETFs mit Soll-% anlegen.</div>'; return; }
 
-  const ausgeglichen = items.every(e => e.ausgeglichen);
-  const kaufItems = items.filter(e => e.invest > 0.5);
-  const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
+  const G = etfs.filter(e => e.soll_prozent > 0).reduce((s, e) => s + (e.ist_wert || 0), 0);
 
-  const rows = kaufItems.map(e => {
-    const anteil = e.invest / betrag * 100;
+  // Alle ETFs anzeigen, sortiert nach Investitionsbetrag absteigend
+  const sorted = [...items].sort((a, b) => b.invest - a.invest);
+
+  const rows = sorted.map(e => {
+    const anteil = betrag > 0 ? e.invest / betrag * 100 : 0;
+    const kauf = e.invest > 0.01;
     return `<div class="inv-row">
-      <span style="color:var(--text2)">${e.name}</span>
-      <span style="color:var(--text3);font-size:10px">${e.istPct.toFixed(1)}% → ~${e.neueIstPct.toFixed(1)}%</span>
-      <span style="color:var(--accent);font-weight:500">${fe(e.invest)}</span>
-      <span style="color:var(--text3);font-size:10px">${anteil.toFixed(1)}%</span>
+      <span style="color:${kauf ? 'var(--text)' : 'var(--text3)'}">${e.name}</span>
+      <span style="font-size:10px;color:var(--text3)">${e.istPctVorher.toFixed(1)}% → <span style="color:var(--accent)">${e.istPctNachher.toFixed(1)}%</span> <span style="color:var(--green)">(Soll:${e.sollPct.toFixed(1)}%)</span></span>
+      <span style="color:${kauf ? 'var(--accent)' : 'var(--text3)'};font-weight:${kauf ? '600' : '400'}">${kauf ? fe(e.invest) : '—'}</span>
+      <span style="color:var(--text3);font-size:10px">${kauf ? anteil.toFixed(1)+'%' : ''}</span>
     </div>`;
   }).join('');
 
   box.innerHTML = `<div class="inv-result">
-    ${ausgeglichen ? `<div style="font-size:10px;color:var(--green);margin-bottom:10px">✓ Portfolio ausgeglichen – Verteilung nach Soll-%</div>` : `<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Optimale Aufteilung von ${fe(betrag)}</div>`}
+    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">Optimale Aufteilung von ${fe(betrag)} — alle ${items.length} ETFs</div>
     <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px;font-size:9px;color:var(--text3);margin-bottom:6px;padding:0 2px;text-transform:uppercase;letter-spacing:.05em">
-      <span>ETF</span><span>IST→NEU</span><span>Invest</span><span>Anteil</span>
+      <span>ETF</span><span>IST → NEU (Soll)</span><span>Invest</span><span>Anteil</span>
     </div>
     ${rows}
     <div class="inv-row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:10px">
-      <span style="font-weight:600;color:var(--text)">Gesamt</span>
+      <span style="font-weight:600;color:var(--text)">Gesamt investiert</span>
       <span></span>
       <span style="color:var(--accent);font-family:var(--fd);font-size:15px;font-weight:700">${fe(betrag)}</span>
       <span></span>
     </div>
-    <div style="font-size:10px;color:var(--text3);margin-top:8px">
-      ${ausgeglichen ? 'Portfolio war ausgeglichen – Verteilung 1:1 nach Soll-%.' : 'Untergewichtete ETFs werden proportional zu ihrer Lücke (SOLL−IST) befüllt.'}
+    <div style="font-size:10px;color:var(--text3);margin-top:8px;line-height:1.5">
+      Jeder ETF erhält: <code style="color:var(--accent2)">x_i = Soll_i × (G+X) − IST_i</code>. ETFs die schon übergewichtet sind bekommen 0 (kein Verkauf).
     </div>
   </div>`;
 }
 
 // ══════════════════════════════════════════
 // ETF – SPARPLAN RECHNER
-// Input: Monatsbetrag → aufgeteilt nach Intervall pro Ausführung
-// Beispiel: 200€/Mo, 50/50, wöchentlich → je 25€/Woche pro ETF
+// Input: Monatsbetrag M, Intervall
+// Logik: Betrag pro Ausführung = M ÷ Ausführungen/Monat
+//        Verteilung = verteileOptimal(betragProAusf)
+//        Simulation: wie viele Ausführungen bis nächste Umverteilung?
 // ══════════════════════════════════════════
 function calcSparplan() {
   const monatsbetrag = parseFloat(document.getElementById('spBetrag').value);
@@ -1056,57 +1075,82 @@ function calcSparplan() {
   const box = document.getElementById('sparplanResult');
   if (!monatsbetrag || monatsbetrag <= 0 || !etfs.length) { box.innerHTML = ''; return; }
 
-  // Ausführungen pro Monat & Betrag pro Ausführung
   const ausfProMonat = spInt === 'woechentlich' ? 4 : spInt === 'zweiwochentlich' ? 2 : 1;
   const betragProAusf = monatsbetrag / ausfProMonat;
   const intLabel = spInt === 'woechentlich' ? 'pro Woche' : spInt === 'zweiwochentlich' ? 'pro 2 Wochen' : 'pro Monat';
   const intLabelKurz = spInt === 'woechentlich' ? '/Wo' : spInt === 'zweiwochentlich' ? '/2Wo' : '/Mo';
 
-  // Verteile den MONATSBETRAG optimal (für Proportionen), dann skaliere auf Ausführung
-  const items = verteileOptimal(monatsbetrag);
+  // Aktuelle Verteilung für DIESE Ausführung
+  const items = verteileOptimal(betragProAusf);
   if (!items) { box.innerHTML = ''; return; }
 
-  const kaufItems = items.filter(e => e.invest > 0.01);
-  const ausgeglichen = items.every(e => e.ausgeglichen);
+  // Simulation: wie viele Ausführungen bis sich die Reihenfolge ändert?
+  // (d.h. bis ein anderer ETF höchste Priorität bekommt)
+  // Simuliere bis zu 52 Ausführungen und finde den Wechselpunkt
+  let simWerte = etfs.map(e => ({ ...e })); // deep-ish copy
+  let wechselNach = null;
+  const ersteReihenfolge = items.map(e => e.id).join(',');
 
-  const rows = kaufItems.map(e => {
-    const proAusf = e.invest / ausfProMonat;
+  for (let runde = 1; runde <= 52; runde++) {
+    // Wende Investitionen an
+    items.forEach(item => {
+      const etf = simWerte.find(e => e.id === item.id);
+      if (etf) etf.ist_wert = (etf.ist_wert || 0) + item.invest;
+    });
+    // Berechne neue Verteilung
+    const neueItems = verteileOptimal(betragProAusf, simWerte);
+    if (!neueItems) break;
+    const neueReihenfolge = neueItems
+      .filter(e => e.invest > 0.5)
+      .map(e => e.id).join(',');
+    const alteReihenfolge = items
+      .filter(e => e.invest > 0.5)
+      .map(e => e.id).join(',');
+    if (neueReihenfolge !== alteReihenfolge && wechselNach === null) {
+      wechselNach = runde;
+      break;
+    }
+  }
+
+  const sorted = [...items].sort((a, b) => b.invest - a.invest);
+  const rows = sorted.map(e => {
+    const kauf = e.invest > 0.01;
     return `<div class="inv-row">
-      <span style="color:var(--text2)">${e.name}</span>
-      <span style="color:var(--green);font-size:10px">${e.sollPct.toFixed(1)}% Soll</span>
-      <span style="color:var(--accent);font-weight:500">${fe(proAusf)} <span style="font-size:9px;color:var(--text3)">${intLabelKurz}</span></span>
-      <span style="color:var(--text2);font-size:11px">${fe(e.invest)} /Mo</span>
+      <span style="color:${kauf ? 'var(--text)' : 'var(--text3)'}">${e.name}</span>
+      <span style="font-size:10px"><span style="color:var(--green)">${e.sollPct.toFixed(1)}%</span> <span style="color:var(--text3)">Soll</span></span>
+      <span style="color:${kauf ? 'var(--accent)' : 'var(--text3)'};font-weight:${kauf ? '600' : '400'}">${kauf ? fe(e.invest) : '—'} <span style="font-size:9px;color:var(--text3)">${kauf ? intLabelKurz : ''}</span></span>
+      <span style="color:var(--text2);font-size:11px">${kauf ? fe(e.invest * ausfProMonat) + ' /Mo' : ''}</span>
     </div>`;
   }).join('');
 
+  const wechselText = wechselNach
+    ? `<div style="background:rgba(240,165,0,.07);border:1px solid rgba(240,165,0,.2);border-radius:5px;padding:8px 12px;margin-top:12px;font-size:11px;color:var(--accent3)">
+        🔄 Nach ca. <strong>${wechselNach} Ausführung${wechselNach>1?'en':''}</strong> (≈ ${(wechselNach/ausfProMonat).toFixed(1)} Monat${wechselNach/ausfProMonat>1?'e':''}) ändert sich die optimale Verteilung – dann neu berechnen.
+       </div>`
+    : `<div style="font-size:10px;color:var(--text3);margin-top:10px">✓ Diese Verteilung bleibt für die nächsten Ausführungen stabil.</div>`;
+
   box.innerHTML = `<div class="inv-result">
-    <div style="background:rgba(0,212,170,.05);border:1px solid rgba(0,212,170,.15);border-radius:5px;padding:10px 12px;margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-      <div>
-        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">Monatsbetrag</div>
-        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--accent)">${fe(monatsbetrag)}</div>
-      </div>
-      <div style="color:var(--text3);font-size:18px">÷</div>
-      <div>
-        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">Ausführungen</div>
-        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--text)">${ausfProMonat}× / Monat</div>
-      </div>
-      <div style="color:var(--text3);font-size:18px">=</div>
-      <div>
-        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">${intLabel}</div>
-        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--accent3)">${fe(betragProAusf)}</div>
-      </div>
+    <div style="background:rgba(0,212,170,.05);border:1px solid rgba(0,212,170,.15);border-radius:5px;padding:10px 14px;margin-bottom:12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+      <div><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">Monatsbetrag</div>
+        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--accent)">${fe(monatsbetrag)}</div></div>
+      <div style="color:var(--text3);font-size:20px">÷</div>
+      <div><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">Ausführungen/Mo</div>
+        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--text)">${ausfProMonat}×</div></div>
+      <div style="color:var(--text3);font-size:20px">=</div>
+      <div><div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">${intLabel}</div>
+        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--accent3)">${fe(betragProAusf)}</div></div>
     </div>
-    ${ausgeglichen ? `<div style="font-size:10px;color:var(--green);margin-bottom:10px">✓ Portfolio ausgeglichen – Verteilung nach Soll-%</div>` : `<div style="font-size:10px;color:var(--text3);margin-bottom:10px">Untergewichtete ETFs zuerst befüllt (proportional zur Lücke)</div>`}
+    <div style="font-size:10px;color:var(--text3);margin-bottom:10px">Verteilung für die <strong style="color:var(--text)">nächste Ausführung</strong> (${items.filter(e=>e.invest>0.01).length} von ${items.length} ETFs aktiv)</div>
     <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px;font-size:9px;color:var(--text3);margin-bottom:6px;padding:0 2px;text-transform:uppercase;letter-spacing:.05em">
-      <span>ETF</span><span>Soll-%</span><span>${intLabel}</span><span>/ Monat</span>
+      <span>ETF</span><span>Soll-%</span><span>${intLabelKurz}</span><span>/ Monat</span>
     </div>
     ${rows}
     <div class="inv-row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:10px">
-      <span style="font-weight:600;color:var(--text)">Gesamt</span>
-      <span></span>
+      <span style="font-weight:600;color:var(--text)">Gesamt</span><span></span>
       <span style="color:var(--accent3);font-family:var(--fd);font-weight:700">${fe(betragProAusf)} ${intLabelKurz}</span>
       <span style="color:var(--accent);font-family:var(--fd);font-weight:700">${fe(monatsbetrag)} /Mo</span>
     </div>
+    ${wechselText}
   </div>`;
 }
 
