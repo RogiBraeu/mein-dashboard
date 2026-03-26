@@ -73,7 +73,7 @@ header{display:flex;align-items:center;justify-content:space-between;padding:12p
 .tb{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--border);background:var(--bg3);gap:8px;flex-wrap:wrap;}
 .tb-title{font-family:var(--fd);font-size:13px;font-weight:600;color:var(--accent);}
 .tbl-wrap{overflow-x:auto;}
-table{width:100%;border-collapse:collapse;min-width:500px;}
+table{width:100%;border-collapse:collapse;min-width:320px;}
 thead th{text-align:left;padding:9px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);border-bottom:1px solid var(--border);white-space:nowrap;}
 thead th.r{text-align:right;}
 tbody tr{border-bottom:1px solid rgba(42,42,58,.4);transition:background .1s;}
@@ -332,19 +332,19 @@ hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
     <div class="card">
       <div class="card-label" style="margin-bottom:12px">📊 Sparplan optimal verteilen</div>
       <p style="color:var(--text2);font-size:12px;margin-bottom:14px;line-height:1.6">
-        Gib deinen Sparplan-Betrag ein – er wird so auf die ETFs verteilt dass das Portfolio möglichst schnell zur Soll-Gewichtung kommt. Nur ETFs die aktuell unter ihrer Soll-% liegen werden bespielt.
+        Gib deinen <strong style="color:var(--accent)">monatlichen Sparbetrag</strong> ein – er wird auf die ETFs verteilt und je nach Intervall auf wöchentliche / 2-wöchentliche / monatliche Ausführungen heruntergebrochen.
       </p>
       <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
         <div class="fg" style="flex:1;min-width:160px;margin:0">
-          <label class="fl">Sparplan-Betrag €</label>
+          <label class="fl">Monatsbetrag € / Monat</label>
           <input type="number" id="spBetrag" class="fi" placeholder="z.B. 500" oninput="calcSparplan()">
         </div>
         <div class="fg" style="flex:1;min-width:160px;margin:0">
           <label class="fl">Ausführungs-Intervall</label>
           <select id="spIntervall" class="fi" onchange="calcSparplan()">
-            <option value="woechentlich">Wöchentlich (×4/Mo)</option>
-            <option value="zweiwochentlich">2-Wöchentlich (×2/Mo)</option>
-            <option value="monatlich">Monatlich (×1/Mo)</option>
+            <option value="woechentlich">Wöchentlich (÷4 je Ausf.)</option>
+            <option value="zweiwochentlich">2-Wöchentlich (÷2 je Ausf.)</option>
+            <option value="monatlich">Monatlich (voller Betrag)</option>
           </select>
         </div>
       </div>
@@ -750,11 +750,19 @@ function renderEtfTable() {
         <div style="font-weight:500">${e.name}</div>
         ${e.isin ? `<div style="font-size:10px;color:var(--text3)">${e.isin}</div>` : ''}
         ${e.notizen ? `<div style="font-size:10px;color:var(--accent2)">${e.notizen}</div>` : ''}
+        <div class="ist-mobile" style="display:none;margin-top:5px">
+          <span style="font-size:10px;color:var(--text3)">IST: </span>
+          <span class="ist-val-inline" data-id="${e.id}" onclick="inlineEditIst('${e.id}',this)" style="font-size:12px;color:var(--accent);cursor:pointer;border-bottom:1px dashed var(--accent3)">${fe(ist)}</span>
+          <span style="font-size:10px;color:var(--text3);margin-left:8px">Soll: </span>
+          <span style="font-size:12px;color:var(--green)">${sollPct ? sollPct.toFixed(1)+'%' : '—'}</span>
+        </div>
       </td>
-      <td class="r">${fe(ist)}</td>
-      <td class="r">
+      <td class="r ist-desktop">
+        <span class="ist-val-inline" data-id="${e.id}" onclick="inlineEditIst('${e.id}',this)" style="cursor:pointer;border-bottom:1px dashed var(--accent3);padding-bottom:1px" title="Klicken zum Bearbeiten">${fe(ist)}</span>
+      </td>
+      <td class="r ist-desktop">
         <div style="font-size:11px;color:var(--text)">${istPct.toFixed(1)}%</div>
-        <div style="font-size:10px;color:var(--text3)">Soll: ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</div>
+        <div style="font-size:10px;color:var(--green)">Soll: ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</div>
       </td>
       <td class="r">${abwBadge}</td>
       <td class="r">
@@ -769,13 +777,50 @@ function renderEtfTable() {
   wrap.innerHTML = `<table>
     <thead><tr>
       <th>ETF</th>
-      <th class="r">IST Wert</th>
-      <th class="r">IST % / SOLL %</th>
-      <th class="r">Abweichung</th>
+      <th class="r ist-desktop">IST Wert <span style="color:var(--accent3);font-size:9px">✎</span></th>
+      <th class="r ist-desktop">IST % / <span style="color:var(--green)">SOLL %</span></th>
+      <th class="r">Abw.</th>
       <th class="r"></th>
     </tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
+
+  // Mobile: hide desktop columns, show inline
+  applyMobileLayout();
+}
+
+function applyMobileLayout() {
+  const isMobile = window.innerWidth < 600;
+  document.querySelectorAll('.ist-desktop').forEach(el => el.style.display = isMobile ? 'none' : '');
+  document.querySelectorAll('.ist-mobile').forEach(el => el.style.display = isMobile ? '' : 'none');
+}
+window.addEventListener('resize', () => { if(etfs.length) applyMobileLayout(); });
+
+async function inlineEditIst(id, el) {
+  if (el.tagName === 'INPUT') return;
+  const etf = etfs.find(e => e.id === id);
+  const curVal = etf ? (etf.ist_wert || 0) : 0;
+  const originalHtml = el.outerHTML;
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.value = curVal;
+  input.step = '0.01';
+  input.className = 'fi';
+  input.style.cssText = 'width:100px;padding:3px 6px;font-size:12px;text-align:right;display:inline-block';
+  el.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const newVal = parseFloat(input.value);
+    if (isNaN(newVal)) { input.replaceWith(el); return; }
+    const {error} = await SB.from('etf_positionen').update({ist_wert: newVal, aktualisiert_am: new Date().toISOString()}).eq('id', id);
+    if (error) { toast('Fehler beim Speichern', true); input.replaceWith(el); return; }
+    toast('✓ IST-Wert aktualisiert');
+    loadEtf();
+  };
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { input.blur(); } if (e.key === 'Escape') { input.replaceWith(el); } });
 }
 
 // ══════════════════════════════════════════
@@ -916,6 +961,47 @@ function renderRebalance() {
 }
 
 // ══════════════════════════════════════════
+// KERN-BERECHNUNG: Betrag optimal aufteilen
+// Gibt Array zurück: [{etf, invest, istPct, sollPct, neueIstPct}]
+// Logik: Untergewichtete proportional zur Lücke (sollPct - istPct) befüllen
+// ══════════════════════════════════════════
+function verteileOptimal(betrag) {
+  const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
+  const etfsMitSoll = etfs.filter(e => (e.soll_prozent || 0) > 0);
+  if (!etfsMitSoll.length) return null;
+
+  const items = etfsMitSoll.map(e => {
+    const ist = e.ist_wert || 0;
+    const istPct = istGesamt > 0 ? ist / istGesamt * 100 : 0;
+    const sollPct = e.soll_prozent * 100; // soll_prozent ist 0..1 in DB, z.B. 0.43 = 43%
+    const luecke = Math.max(0, sollPct - istPct);
+    return { ...e, ist, istPct, sollPct, luecke };
+  });
+
+  const untergewichtet = items.filter(e => e.luecke > 0.01);
+  const gesamtLuecke = untergewichtet.reduce((s, e) => s + e.luecke, 0);
+
+  if (gesamtLuecke < 0.01) {
+    // Ausgeglichen: nach Soll-% verteilen
+    const gesamtSoll = items.reduce((s, e) => s + e.soll_prozent, 0);
+    return items.map(e => {
+      const invest = betrag * (e.soll_prozent / gesamtSoll);
+      const neuerIst = e.ist + invest;
+      const neueIstPct = (istGesamt + betrag) > 0 ? neuerIst / (istGesamt + betrag) * 100 : e.sollPct;
+      return { ...e, invest, neueIstPct, ausgeglichen: true };
+    });
+  }
+
+  return items.map(e => {
+    if (e.luecke <= 0.01) return { ...e, invest: 0, neueIstPct: (istGesamt + betrag) > 0 ? e.ist / (istGesamt + betrag) * 100 : e.istPct };
+    const invest = betrag * (e.luecke / gesamtLuecke);
+    const neuerIst = e.ist + invest;
+    const neueIstPct = (istGesamt + betrag) > 0 ? neuerIst / (istGesamt + betrag) * 100 : e.sollPct;
+    return { ...e, invest, neueIstPct };
+  });
+}
+
+// ══════════════════════════════════════════
 // ETF – EINMALZAHLUNG
 // ══════════════════════════════════════════
 function calcEinmal() {
@@ -923,16 +1009,12 @@ function calcEinmal() {
   const box = document.getElementById('einmalResult');
   if (!betrag || betrag <= 0 || !etfs.length) { box.innerHTML = ''; return; }
 
-  const data = calcRebalanceData(betrag);
-  if (!data) { box.innerHTML = ''; return; }
+  const items = verteileOptimal(betrag);
+  if (!items) { box.innerHTML = '<div style="color:var(--text3);padding:10px;font-size:12px">Bitte zuerst ETFs mit Soll-% anlegen.</div>'; return; }
 
-  if (data.balanced) {
-    box.innerHTML = `<div class="inv-result"><div style="color:var(--green);text-align:center;padding:10px">✓ Portfolio ist bereits optimal verteilt!</div></div>`;
-    return;
-  }
-
+  const ausgeglichen = items.every(e => e.ausgeglichen);
+  const kaufItems = items.filter(e => e.invest > 0.5);
   const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
-  const kaufItems = data.items.filter(e => e.invest > 0.5);
 
   const rows = kaufItems.map(e => {
     const anteil = e.invest / betrag * 100;
@@ -944,98 +1026,86 @@ function calcEinmal() {
     </div>`;
   }).join('');
 
-  const verbleibenRest = betrag - kaufItems.reduce((s, e) => s + e.invest, 0);
-
   box.innerHTML = `<div class="inv-result">
-    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Optimale Aufteilung von ${fe(betrag)}</div>
+    ${ausgeglichen ? `<div style="font-size:10px;color:var(--green);margin-bottom:10px">✓ Portfolio ausgeglichen – Verteilung nach Soll-%</div>` : `<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Optimale Aufteilung von ${fe(betrag)}</div>`}
     <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px;font-size:9px;color:var(--text3);margin-bottom:6px;padding:0 2px;text-transform:uppercase;letter-spacing:.05em">
       <span>ETF</span><span>IST→NEU</span><span>Invest</span><span>Anteil</span>
     </div>
     ${rows}
     <div class="inv-row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:10px">
-      <span style="font-weight:600;color:var(--text)">Gesamt investiert</span>
+      <span style="font-weight:600;color:var(--text)">Gesamt</span>
       <span></span>
       <span style="color:var(--accent);font-family:var(--fd);font-size:15px;font-weight:700">${fe(betrag)}</span>
       <span></span>
     </div>
-    ${Math.abs(verbleibenRest) > 0.5 ? `<div style="font-size:10px;color:var(--accent3);margin-top:8px">⚠️ ${fe(Math.abs(verbleibenRest))} fließen in übergewichtete ETFs – werden ignoriert (kein Verkauf)</div>` : ''}
     <div style="font-size:10px;color:var(--text3);margin-top:8px">
-      Untergewichtete ETFs werden proportional zu ihrer Lücke bespielt.
+      ${ausgeglichen ? 'Portfolio war ausgeglichen – Verteilung 1:1 nach Soll-%.' : 'Untergewichtete ETFs werden proportional zu ihrer Lücke (SOLL−IST) befüllt.'}
     </div>
   </div>`;
 }
 
 // ══════════════════════════════════════════
 // ETF – SPARPLAN RECHNER
+// Input: Monatsbetrag → aufgeteilt nach Intervall pro Ausführung
+// Beispiel: 200€/Mo, 50/50, wöchentlich → je 25€/Woche pro ETF
 // ══════════════════════════════════════════
 function calcSparplan() {
-  const betrag = parseFloat(document.getElementById('spBetrag').value);
+  const monatsbetrag = parseFloat(document.getElementById('spBetrag').value);
   const sel = document.getElementById('spIntervall');
   const spInt = sel ? sel.value : intervall;
   const box = document.getElementById('sparplanResult');
-  if (!betrag || betrag <= 0 || !etfs.length) { box.innerHTML = ''; return; }
+  if (!monatsbetrag || monatsbetrag <= 0 || !etfs.length) { box.innerHTML = ''; return; }
 
-  const mul = spInt === 'woechentlich' ? 4.33 : spInt === 'zweiwochentlich' ? 2.17 : 1;
-  const intLabel = spInt === 'woechentlich' ? 'wöchentlich' : spInt === 'zweiwochentlich' ? '2-wöchentlich' : 'monatlich';
+  // Ausführungen pro Monat & Betrag pro Ausführung
+  const ausfProMonat = spInt === 'woechentlich' ? 4 : spInt === 'zweiwochentlich' ? 2 : 1;
+  const betragProAusf = monatsbetrag / ausfProMonat;
+  const intLabel = spInt === 'woechentlich' ? 'pro Woche' : spInt === 'zweiwochentlich' ? 'pro 2 Wochen' : 'pro Monat';
+  const intLabelKurz = spInt === 'woechentlich' ? '/Wo' : spInt === 'zweiwochentlich' ? '/2Wo' : '/Mo';
 
-  const data = calcRebalanceData(betrag);
-  if (!data) { box.innerHTML = ''; return; }
+  // Verteile den MONATSBETRAG optimal (für Proportionen), dann skaliere auf Ausführung
+  const items = verteileOptimal(monatsbetrag);
+  if (!items) { box.innerHTML = ''; return; }
 
-  if (data.balanced) {
-    // Portfolio ausgeglichen: nach Soll-% verteilen
-    const etfsMitSoll = etfs.filter(e => e.soll_prozent > 0);
-    const gesamtSoll = etfsMitSoll.reduce((s, e) => s + e.soll_prozent, 0);
-    const rows = etfsMitSoll.map(e => {
-      const anteil = e.soll_prozent / gesamtSoll;
-      const inv = betrag * anteil;
-      return `<div class="inv-row">
-        <span style="color:var(--text2)">${e.name}</span>
-        <span style="color:var(--text3);font-size:10px">${(e.soll_prozent*100).toFixed(1)}%</span>
-        <span style="color:var(--accent);font-weight:500">${fe(inv)}</span>
-        <span style="color:var(--text3);font-size:10px">${fe(inv * mul)} / Mo</span>
-      </div>`;
-    }).join('');
-    box.innerHTML = `<div class="inv-result">
-      <div style="font-size:10px;color:var(--green);margin-bottom:10px">✓ Portfolio ist ausgeglichen – Verteilung nach Soll-%</div>
-      <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px;font-size:9px;color:var(--text3);margin-bottom:6px;padding:0 2px;text-transform:uppercase;letter-spacing:.05em">
-        <span>ETF</span><span>Soll</span><span>${intLabel}</span><span>/ Monat</span>
-      </div>
-      ${rows}
-      <div class="inv-row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:10px">
-        <span style="font-weight:600">Gesamt</span><span></span>
-        <span style="color:var(--accent);font-family:var(--fd);font-weight:700">${fe(betrag)}</span>
-        <span style="color:var(--text2)">${fe(betrag * mul)} / Mo</span>
-      </div>
-    </div>`;
-    return;
-  }
+  const kaufItems = items.filter(e => e.invest > 0.01);
+  const ausgeglichen = items.every(e => e.ausgeglichen);
 
-  const kaufItems = data.items.filter(e => e.invest > 0.5);
   const rows = kaufItems.map(e => {
-    const anteil = e.invest / betrag * 100;
+    const proAusf = e.invest / ausfProMonat;
     return `<div class="inv-row">
       <span style="color:var(--text2)">${e.name}</span>
-      <span style="color:var(--text3);font-size:10px">${e.istPct.toFixed(1)}% → ~${e.neueIstPct.toFixed(1)}%</span>
-      <span style="color:var(--accent);font-weight:500">${fe(e.invest)}</span>
-      <span style="color:var(--text3);font-size:10px">${fe(e.invest * mul)} / Mo</span>
+      <span style="color:var(--green);font-size:10px">${e.sollPct.toFixed(1)}% Soll</span>
+      <span style="color:var(--accent);font-weight:500">${fe(proAusf)} <span style="font-size:9px;color:var(--text3)">${intLabelKurz}</span></span>
+      <span style="color:var(--text2);font-size:11px">${fe(e.invest)} /Mo</span>
     </div>`;
   }).join('');
 
   box.innerHTML = `<div class="inv-result">
-    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">
-      Sparplan ${fe(betrag)} ${intLabel} → ${fe(betrag * mul, 0)} / Monat (Ø)
+    <div style="background:rgba(0,212,170,.05);border:1px solid rgba(0,212,170,.15);border-radius:5px;padding:10px 12px;margin-bottom:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+      <div>
+        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">Monatsbetrag</div>
+        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--accent)">${fe(monatsbetrag)}</div>
+      </div>
+      <div style="color:var(--text3);font-size:18px">÷</div>
+      <div>
+        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">Ausführungen</div>
+        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--text)">${ausfProMonat}× / Monat</div>
+      </div>
+      <div style="color:var(--text3);font-size:18px">=</div>
+      <div>
+        <div style="font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em">${intLabel}</div>
+        <div style="font-family:var(--fd);font-size:18px;font-weight:700;color:var(--accent3)">${fe(betragProAusf)}</div>
+      </div>
     </div>
+    ${ausgeglichen ? `<div style="font-size:10px;color:var(--green);margin-bottom:10px">✓ Portfolio ausgeglichen – Verteilung nach Soll-%</div>` : `<div style="font-size:10px;color:var(--text3);margin-bottom:10px">Untergewichtete ETFs zuerst befüllt (proportional zur Lücke)</div>`}
     <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px;font-size:9px;color:var(--text3);margin-bottom:6px;padding:0 2px;text-transform:uppercase;letter-spacing:.05em">
-      <span>ETF</span><span>IST→NEU</span><span>${intLabel}</span><span>/ Monat</span>
+      <span>ETF</span><span>Soll-%</span><span>${intLabel}</span><span>/ Monat</span>
     </div>
     ${rows}
     <div class="inv-row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:10px">
-      <span style="font-weight:600">Gesamt</span><span></span>
-      <span style="color:var(--accent);font-family:var(--fd);font-weight:700">${fe(betrag)}</span>
-      <span style="color:var(--text2)">${fe(betrag * mul, 0)} / Mo</span>
-    </div>
-    <div style="font-size:10px;color:var(--text3);margin-top:8px">
-      Nur untergewichtete ETFs werden bespielt. Übergewichtete werden ausgelassen bis sie wieder unter Soll sind.
+      <span style="font-weight:600;color:var(--text)">Gesamt</span>
+      <span></span>
+      <span style="color:var(--accent3);font-family:var(--fd);font-weight:700">${fe(betragProAusf)} ${intLabelKurz}</span>
+      <span style="color:var(--accent);font-family:var(--fd);font-weight:700">${fe(monatsbetrag)} /Mo</span>
     </div>
   </div>`;
 }
