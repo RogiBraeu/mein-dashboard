@@ -615,6 +615,39 @@ let allokChartInst = null;
 let dipStufenTemp = [];
 
 // ══════════════════════════════════════════
+// GRUPPEN-MAPPING
+// Passive ETFs (Soll=0) deren IST-Wert dem
+// aktiven ETF der Gruppe zugerechnet wird.
+// Key = ISIN des passiven ETF
+// Value = ISIN des aktiven (besparteten) ETF
+// ══════════════════════════════════════════
+const GRUPPEN_PASSIV_ZU_AKTIV = {
+  'IE00B60SX394': 'IE00B4L5Y983', // World IVESCO → World iShares
+  'LU1681045370': 'IE00BKM4GZ66', // EM Amundi   → EM iShares IMI
+};
+
+// Gibt für einen ETF seinen "effektiven IST-Wert" zurück:
+// Für aktive ETFs = eigener IST + IST aller passiven Partner
+// Für passive ETFs = 0 (ihr Wert steckt schon im aktiven)
+function getEffektivenIst(etf, alleEtfs) {
+  // Ist dieser ETF passiv (Soll=0 und in Gruppen-Map)?
+  if (GRUPPEN_PASSIV_ZU_AKTIV[etf.isin]) return 0;
+  // Ist dieser ETF ein aktiver Gruppen-ETF? Addiere alle passiven Partner
+  let extra = 0;
+  alleEtfs.forEach(e => {
+    if (GRUPPEN_PASSIV_ZU_AKTIV[e.isin] === etf.isin) {
+      extra += (e.ist_wert || 0);
+    }
+  });
+  return (etf.ist_wert || 0) + extra;
+}
+
+// Prüft ob ein ETF passiv (nur IST-Tracking, nicht im Sparplan) ist
+function isPassivEtf(etf) {
+  return !!GRUPPEN_PASSIV_ZU_AKTIV[etf.isin];
+}
+
+// ══════════════════════════════════════════
 // NAV / TABS
 // ══════════════════════════════════════════
 function showPage(name, btn) {
@@ -693,12 +726,13 @@ function renderEtfKpis() {
   const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
   const sollSumme = etfs.reduce((s, e) => s + (e.soll_prozent || 0), 0);
 
-  // Berechne max Abweichung IST vs SOLL
+  // Berechne max Abweichung IST vs SOLL – nur für aktive ETFs, mit Gruppen-IST
   let maxAbw = 0;
   let maxAbwName = '';
   if (istGesamt > 0) {
-    etfs.forEach(e => {
-      const istPct = (e.ist_wert || 0) / istGesamt * 100;
+    etfs.filter(e => !isPassivEtf(e) && (e.soll_prozent || 0) > 0).forEach(e => {
+      const effIst = getEffektivenIst(e, etfs);
+      const istPct = effIst / istGesamt * 100;
       const sollPct = (e.soll_prozent || 0) * 100;
       const abw = Math.abs(istPct - sollPct);
       if (abw > maxAbw) { maxAbw = abw; maxAbwName = e.name; }
@@ -738,30 +772,48 @@ function renderEtfTable() {
 
   const rows = etfs.map(e => {
     const ist = e.ist_wert || 0;
-    const istPct = istGesamt > 0 ? ist / istGesamt * 100 : 0;
+    const passiv = isPassivEtf(e);
+    // Für passive ETFs: IST% = eigener Anteil am Gesamtdepot (info only)
+    // Für aktive ETFs: effektiven IST nutzen (inkl. Partner)
+    const effIst = passiv ? ist : getEffektivenIst(e, etfs);
+    const istPct = istGesamt > 0 ? ist / istGesamt * 100 : 0; // Zeige echten Anteil in Tabelle
+    const effIstPct = istGesamt > 0 ? effIst / istGesamt * 100 : 0;
     const sollPct = (e.soll_prozent || 0) * 100;
-    const delta = istPct - sollPct;
-    const abwBadge = Math.abs(delta) < 0.5
-      ? `<span class="badge bg">✓</span>`
-      : `<span class="badge ${delta > 0 ? 'bgr' : 'by'}">${delta > 0 ? '+' : ''}${delta.toFixed(1)}%</span>`;
 
-    return `<tr>
+    let abwBadge;
+    if (passiv) {
+      // Passiver Gruppen-ETF: kein Soll-Vergleich, stattdessen Gruppen-Info
+      const aktivName = etfs.find(a => a.isin === GRUPPEN_PASSIV_ZU_AKTIV[e.isin])?.name || '';
+      abwBadge = `<span class="badge by" title="Passiver Gruppen-ETF – IST-Wert wird ${aktivName} zugerechnet">Gruppe</span>`;
+    } else {
+      const delta = effIstPct - sollPct;
+      abwBadge = Math.abs(delta) < 0.5
+        ? `<span class="badge bg">✓</span>`
+        : `<span class="badge ${delta > 0 ? 'bgr' : 'by'}">${delta > 0 ? '+' : ''}${delta.toFixed(1)}%</span>`;
+    }
+
+    return `<tr${passiv ? ' style="opacity:0.75"' : ''}>
       <td>
-        <div style="font-weight:500">${e.name}</div>
+        <div style="font-weight:500">${e.name}${passiv ? ' <span style="font-size:9px;color:var(--accent3);font-weight:400">↗ Gruppe</span>' : ''}</div>
         ${e.isin ? `<div style="font-size:10px;color:var(--text3)">${e.isin}</div>` : ''}
+        ${passiv ? `<div style="font-size:10px;color:var(--accent3)">IST-Tracking · kein Sparplan</div>` : ''}
+        ${!passiv && effIst > ist ? `<div style="font-size:10px;color:var(--accent2)">+${fe(effIst-ist)} Gruppenanteil</div>` : ''}
         ${e.notizen ? `<div style="font-size:10px;color:var(--accent2)">${e.notizen}</div>` : ''}
         <div class="ist-mobile" style="display:none;margin-top:5px">
           <span class="ist-val-inline" data-id="${e.id}" onclick="inlineEditIst('${e.id}',this)" style="font-size:12px;color:var(--accent);cursor:pointer;border-bottom:1px dashed var(--accent3)">${fe(ist)}</span>
           <span style="font-size:11px;color:var(--text);margin-left:8px">${istPct.toFixed(1)}%</span>
-          <span style="font-size:11px;color:var(--green);margin-left:4px">▸ ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</span>
+          ${!passiv && sollPct ? `<span style="font-size:11px;color:var(--green);margin-left:4px">▸ ${sollPct.toFixed(1)}% <span style="color:var(--text3)">(eff.${effIstPct.toFixed(1)}%)</span></span>` : ''}
         </div>
       </td>
       <td class="r ist-desktop">
         <span class="ist-val-inline" data-id="${e.id}" onclick="inlineEditIst('${e.id}',this)" style="cursor:pointer;border-bottom:1px dashed var(--accent3);padding-bottom:1px" title="Klicken zum Bearbeiten">${fe(ist)}</span>
+        ${!passiv && effIst > ist ? `<div style="font-size:10px;color:var(--accent2);margin-top:2px">eff. ${fe(effIst)}</div>` : ''}
       </td>
       <td class="r ist-desktop">
-        <div style="font-size:12px;color:var(--text);font-weight:500">${istPct.toFixed(1)}%</div>
-        <div style="font-size:11px;color:var(--green);margin-top:2px">▸ ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</div>
+        ${passiv
+          ? `<div style="font-size:11px;color:var(--accent3)">${istPct.toFixed(1)}%</div><div style="font-size:10px;color:var(--text3)">kein Soll</div>`
+          : `<div style="font-size:12px;color:var(--text);font-weight:500">${effIstPct.toFixed(1)}%</div><div style="font-size:11px;color:var(--green);margin-top:2px">▸ ${sollPct ? sollPct.toFixed(1)+'%' : '—'}</div>`
+        }
       </td>
       <td class="r">${abwBadge}</td>
       <td class="r">
@@ -823,45 +875,37 @@ async function inlineEditIst(id, el) {
 }
 
 // ══════════════════════════════════════════
-// REBALANCING – Kernfunktion
-// ══════════════════════════════════════════
-// Logik (nur kaufen):
-// 1. Für jeden ETF der unter SOLL liegt: berechne wie viel Zukauf nötig wäre
-//    damit er auf seine SOLL-% kommt WENN der Gesamtwert um diesen Betrag steigt.
-//    Das ist ein iteratives Problem → lösen via: x_i / (G + X) = soll_i
-//    → x_i = G * soll_i / (1 - soll_i) - ist_i (vereinfacht)
-//    Korrekte Lösung: nur kaufen → Proportional zum Untergewicht verteilen
+// REBALANCING – Kernfunktion (Gruppen-bewusst)
+// Passive ETFs werden ignoriert, aktive bekommen
+// den effektiven IST-Wert (eigener + Gruppen-Partner)
 // ══════════════════════════════════════════
 
 function calcRebalanceData(budget) {
-  // budget = null → berechne wie viel INSGESAMT nötig wäre
   const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
-  const etfsMitSoll = etfs.filter(e => e.soll_prozent > 0);
+  // Nur aktive ETFs (mit Soll, nicht passiv)
+  const etfsMitSoll = etfs.filter(e => e.soll_prozent > 0 && !isPassivEtf(e));
   if (!etfsMitSoll.length || istGesamt <= 0) return null;
 
-  // Schritt 1: IST-% vs SOLL-%
+  // IST-% mit effektivem IST-Wert (Gruppenpartner eingerechnet)
   const items = etfsMitSoll.map(e => {
-    const istPct = (e.ist_wert || 0) / istGesamt * 100;
+    const effIst = getEffektivenIst(e, etfs);
+    const istPct = effIst / istGesamt * 100;
     const sollPct = e.soll_prozent * 100;
-    const untergewicht = Math.max(0, sollPct - istPct); // wie weit unter Soll
-    return { ...e, istPct, sollPct, untergewicht };
+    const untergewicht = Math.max(0, sollPct - istPct);
+    return { ...e, effIst, istPct, sollPct, untergewicht };
   });
 
-  // Schritt 2: Untergewichtete ETFs identifizieren
   const untergewichtet = items.filter(e => e.untergewicht > 0.01);
-
   if (!untergewichtet.length) return { balanced: true, items };
 
   if (budget != null) {
-    // Budget auf untergewichtete ETFs aufteilen – proportional zum Untergewicht
     const gesamtUnter = untergewichtet.reduce((s, e) => s + e.untergewicht, 0);
     const result = items.map(e => {
       if (e.untergewicht <= 0.01) return { ...e, invest: 0, neueIstPct: e.istPct };
       const anteil = e.untergewicht / gesamtUnter;
       const invest = budget * anteil;
-      const neuerIst = (e.ist_wert || 0) + invest;
-      const neuerGesamt = istGesamt + budget;
-      const neueIstPct = neuerIst / neuerGesamt * 100;
+      const neuerEffIst = e.effIst + invest;
+      const neueIstPct = neuerEffIst / (istGesamt + budget) * 100;
       return { ...e, invest, neueIstPct };
     });
     return { balanced: false, items: result, budget };
@@ -881,7 +925,7 @@ function calcRebalanceData(budget) {
     for (let iter = 0; iter < 50; iter++) {
       let newX = 0;
       untergewichtet.forEach(e => {
-        const needed = e.soll_prozent * (G + X) - (e.ist_wert || 0);
+        const needed = e.soll_prozent * (G + X) - e.effIst;
         if (needed > 0) newX += needed;
       });
       if (Math.abs(newX - X) < 0.01) break;
@@ -889,9 +933,8 @@ function calcRebalanceData(budget) {
     }
 
     const result = items.map(e => {
-      if (e.untergewicht <= 0.01) return { ...e, invest: 0, neueIstPct: (e.ist_wert || 0) / (G + X) * 100 };
-      const invest = Math.max(0, e.soll_prozent * (G + X) - (e.ist_wert || 0));
-      const neueIstPct = (e.ist_wert || 0 + invest) / (G + X) * 100;
+      if (e.untergewicht <= 0.01) return { ...e, invest: 0, neueIstPct: e.effIst / (G + X) * 100 };
+      const invest = Math.max(0, e.soll_prozent * (G + X) - e.effIst);
       return { ...e, invest, neueIstPct: e.sollPct }; // nach Kauf exakt auf Soll
     });
     return { balanced: false, items: result, budget: X, totalNeeded: X };
@@ -960,58 +1003,60 @@ function renderRebalance() {
 }
 
 // ══════════════════════════════════════════
-// KERN: Betrag X optimal verteilen
-// Formel: x_i = soll_i * (G+X) - ist_i fuer alle ETFs
-// Falls x_i < 0 (uebergewichtet): x_i = 0, skaliere Rest
-// Input: betrag, optionale werte-Liste (default: etfs)
-// Output: [{...etf, invest, istPctVorher, istPctNachher, sollPct}]
+// KERN: Betrag X optimal verteilen (Gruppen-bewusst)
+// Passive ETFs (Soll=0) werden gefiltert.
+// Aktive Gruppen-ETFs bekommen den effektiven IST-Wert
+// (eigener IST + passiver Partner-IST) als Basis.
+// Investiert wird immer nur in den aktiven ETF.
 // ══════════════════════════════════════════
 function verteileOptimal(betrag, werte) {
-  const W = (werte || etfs).filter(e => (e.soll_prozent || 0) > 0);
+  const alleEtfs = werte || etfs;
+  // Nur aktive ETFs (mit Soll > 0, nicht passiv)
+  const W = alleEtfs.filter(e => (e.soll_prozent || 0) > 0 && !isPassivEtf(e));
   if (!W.length || betrag <= 0) return null;
-  const G = W.reduce((s, e) => s + (e.ist_wert || 0), 0);
+
+  // Gesamtes Depot (alle ETFs inkl. passive)
+  const G = alleEtfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
   const neuerGesamt = G + betrag;
 
-  // Berechne ideale x_i = soll_i * neuerGesamt - ist_i
+  // Für jeden aktiven ETF: effektiver IST-Wert (inkl. Gruppen-Partner)
+  const effIstMap = {};
+  W.forEach(e => { effIstMap[e.id] = getEffektivenIst(e, alleEtfs); });
+
+  // Berechne ideale x_i = soll_i * neuerGesamt - effIst_i
   // Iterativ: wenn negativ -> 0 setzen, skaliere verbleibende
   let aktiv = W.map(e => ({ ...e }));
   let fixes = {};
 
   for (let iter = 0; iter < 30; iter++) {
-    // Berechne x_i fuer aktive ETFs
     const vorschlag = {};
     aktiv.forEach(e => {
-      vorschlag[e.id] = e.soll_prozent * neuerGesamt - (e.ist_wert || 0);
+      vorschlag[e.id] = e.soll_prozent * neuerGesamt - effIstMap[e.id];
     });
-    // Gibt es negative?
     const neg = aktiv.filter(e => vorschlag[e.id] < 0);
     if (!neg.length) break;
-    // Setze negative auf 0 (kein Verkauf), entferne aus aktiv
     neg.forEach(e => { fixes[e.id] = 0; });
     aktiv = aktiv.filter(e => vorschlag[e.id] >= 0);
     if (!aktiv.length) break;
   }
 
-  // Finale x_i fuer aktive ETFs berechnen
   const aktivInvest = {};
   aktiv.forEach(e => {
-    aktivInvest[e.id] = e.soll_prozent * neuerGesamt - (e.ist_wert || 0);
+    aktivInvest[e.id] = e.soll_prozent * neuerGesamt - effIstMap[e.id];
   });
 
-  // Skaliere so dass Summe exakt = betrag
   const sumAktiv = aktiv.reduce((s, e) => s + Math.max(0, aktivInvest[e.id]), 0);
   const scale = sumAktiv > 0 ? betrag / sumAktiv : 0;
 
-  // Baue Ergebnisliste fuer ALLE ETFs mit Soll
   return W.map(e => {
-    const istVorher = e.ist_wert || 0;
-    const istPctVorher = G > 0 ? istVorher / G * 100 : 0;
+    const effIstVorher = effIstMap[e.id];
+    const istPctVorher = G > 0 ? effIstVorher / G * 100 : 0;
     const sollPct = e.soll_prozent * 100;
     const invest = fixes[e.id] !== undefined
       ? 0
       : Math.max(0, aktivInvest[e.id] || 0) * scale;
-    const istNachher = istVorher + invest;
-    const istPctNachher = neuerGesamt > 0 ? istNachher / neuerGesamt * 100 : sollPct;
+    const effIstNachher = effIstVorher + invest;
+    const istPctNachher = neuerGesamt > 0 ? effIstNachher / neuerGesamt * 100 : sollPct;
     return { ...e, invest, istPctVorher, istPctNachher, sollPct };
   });
 }
@@ -1164,27 +1209,32 @@ function renderChart() {
   const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
   const cols = ['#00d4aa','#7b5ea7','#f0a500','#ff4757','#00b4d8','#06d6a0','#ffd166','#ef476f','#118ab2','#8ecae6','#219ebc','#023047'];
 
+  // Alloc-Liste: alle ETFs zeigen, passive mit Hinweis
   document.getElementById('allocList').innerHTML = etfs.map((e, i) => {
     const pct = istGesamt > 0 ? (e.ist_wert||0)/istGesamt*100 : 0;
+    const passiv = isPassivEtf(e);
     return `<div class="ai">
-      <div class="ad" style="background:${cols[i%cols.length]}"></div>
-      <div class="an">${e.name}</div>
-      <div class="ab"><div class="abf" style="width:${Math.min(pct*2,100)}%;background:${cols[i%cols.length]}"></div></div>
-      <div class="ap">${pct.toFixed(1)}%</div>
+      <div class="ad" style="background:${passiv ? 'rgba(123,94,167,0.35)' : cols[i%cols.length]};${passiv?'border:1px dashed #7b5ea7':''}"></div>
+      <div class="an" style="color:${passiv?'var(--text3)':'var(--text2)'}">${e.name}${passiv?' <span style="font-size:9px;color:var(--accent3)">↗</span>':''}</div>
+      <div class="ab"><div class="abf" style="width:${Math.min(pct*2,100)}%;background:${passiv?'rgba(123,94,167,0.35)':cols[i%cols.length]}"></div></div>
+      <div class="ap" style="color:${passiv?'var(--text3)':'var(--text)'}">${pct.toFixed(1)}%</div>
     </div>`;
   }).join('');
 
   if (allokChartInst) allokChartInst.destroy();
-  const labels = etfs.map(e => e.name.length > 15 ? e.name.substring(0,15)+'…' : e.name);
-  const istPcts = etfs.map(e => istGesamt > 0 ? +((e.ist_wert||0)/istGesamt*100).toFixed(2) : 0);
-  const sollPcts = etfs.map(e => e.soll_prozent ? +(e.soll_prozent*100).toFixed(2) : 0);
+
+  // Chart nur für aktive ETFs (mit Soll), effektiver IST
+  const chartEtfs = etfs.filter(e => !isPassivEtf(e) && (e.soll_prozent || 0) > 0);
+  const labels = chartEtfs.map(e => e.name.length > 14 ? e.name.substring(0,14)+'…' : e.name);
+  const istPcts = chartEtfs.map(e => istGesamt > 0 ? +(getEffektivenIst(e, etfs)/istGesamt*100).toFixed(2) : 0);
+  const sollPcts = chartEtfs.map(e => +(e.soll_prozent*100).toFixed(2));
 
   allokChartInst = new Chart(ctx, {
     type: 'bar',
     data: {
       labels,
       datasets: [
-        { label: 'IST %', data: istPcts, backgroundColor: 'rgba(123,94,167,.65)', borderColor: '#7b5ea7', borderWidth: 1, borderRadius: 3 },
+        { label: 'IST % (eff.)', data: istPcts, backgroundColor: 'rgba(123,94,167,.65)', borderColor: '#7b5ea7', borderWidth: 1, borderRadius: 3 },
         { label: 'SOLL %', data: sollPcts, backgroundColor: 'rgba(0,212,170,.4)', borderColor: '#00d4aa', borderWidth: 1, borderRadius: 3 }
       ]
     },
@@ -1601,6 +1651,7 @@ async function delDip(id) {
 // IMPORT
 // ══════════════════════════════════════════
 // IST-Werte werden NICHT importiert – bitte nach dem Import für jeden ETF manuell eintragen
+// Gruppen-ETFs (passiv, Soll=0): World IVESCO (→ World iShares) & EM Amundi (→ EM iShares IMI)
 const EXCEL_ETFS = [
   {name:'World iShares',isin:'IE00B4L5Y983',soll_prozent:0.43,ist_wert:null,ter:0.002},
   {name:'EM iShares IMI',isin:'IE00BKM4GZ66',soll_prozent:0.19,ist_wert:null,ter:0.0018},
@@ -1610,9 +1661,10 @@ const EXCEL_ETFS = [
   {name:'Value',isin:'IE00BP3QZB59',soll_prozent:0.04,ist_wert:null,ter:0.001},
   {name:'Momentum',isin:'IE00BP3QZ825',soll_prozent:0.04,ist_wert:null,ter:0.001},
   {name:'Multifactor',isin:'IE00BZ0PKT83',soll_prozent:0.04,ist_wert:null,ter:0.003},
-  {name:'World IVESCO',isin:'IE00B60SX394',soll_prozent:0.0,ist_wert:null,ter:0.0015},
+  // Gruppen-ETFs (passiv): IST-Wert eintragen, Soll=0, kein Sparplan
+  {name:'World IVESCO',isin:'IE00B60SX394',soll_prozent:0.0,ist_wert:null,ter:0.0015,notizen:'↗ Gruppe: World iShares'},
   {name:'S&P500 iShare',isin:'IE00B5BMR087',soll_prozent:0.02,ist_wert:null,ter:0.0007},
-  {name:'EM Amundi',isin:'LU1681045370',soll_prozent:0.02,ist_wert:null,ter:0.002},
+  {name:'EM Amundi',isin:'LU1681045370',soll_prozent:0.0,ist_wert:null,ter:0.002,notizen:'↗ Gruppe: EM iShares IMI'},
   {name:'Amundi Leveraged MSCI',isin:'FR0010755611',soll_prozent:0.0,ist_wert:null,ter:0.005},
 ];
 
