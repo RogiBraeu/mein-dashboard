@@ -882,63 +882,61 @@ async function inlineEditIst(id, el) {
 
 function calcRebalanceData(budget) {
   const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
-  // Nur aktive ETFs (mit Soll, nicht passiv)
   const etfsMitSoll = etfs.filter(e => e.soll_prozent > 0 && !isPassivEtf(e));
   if (!etfsMitSoll.length || istGesamt <= 0) return null;
 
-  // IST-% mit effektivem IST-Wert (Gruppenpartner eingerechnet)
   const items = etfsMitSoll.map(e => {
     const effIst = getEffektivenIst(e, etfs);
     const istPct = effIst / istGesamt * 100;
     const sollPct = e.soll_prozent * 100;
-    const untergewicht = Math.max(0, sollPct - istPct);
-    return { ...e, effIst, istPct, sollPct, untergewicht };
+    return { ...e, effIst, istPct, sollPct };
   });
 
-  const untergewichtet = items.filter(e => e.untergewicht > 0.01);
-  if (!untergewichtet.length) return { balanced: true, items };
+  const allNearTarget = items.every(e => Math.abs(e.istPct - e.sollPct) < 0.1);
+  if (allNearTarget) return { balanced: true, items };
 
-  if (budget != null) {
-    const gesamtUnter = untergewichtet.reduce((s, e) => s + e.untergewicht, 0);
-    const result = items.map(e => {
-      if (e.untergewicht <= 0.01) return { ...e, invest: 0, neueIstPct: e.istPct };
-      const anteil = e.untergewicht / gesamtUnter;
-      const invest = budget * anteil;
-      const neuerEffIst = e.effIst + invest;
-      const neueIstPct = neuerEffIst / (istGesamt + budget) * 100;
-      return { ...e, invest, neueIstPct };
+  // Korrekter Algorithmus:
+  // Der "härteste" übergewichtete ETF bestimmt wie groß G werden muss:
+  //   G_ziel = max über alle ETFs von (effIst_i / Soll_i)
+  // Alle anderen kaufen bis: IST_neu_i = Soll_i * G_ziel
+  // Übergewichtete kriegen 0 und verdünnen sich durch das wachsende Depot.
+  //
+  // Iteration nötig weil G_neu ≠ G_ziel (übergewichtete bekommen 0,
+  // daher ist G_neu = G + Σ invest_i < G_ziel).
+  // In jedem Schritt neu berechnen bis stabil.
+
+  let totalInvest = new Array(items.length).fill(0);
+
+  for (let runde = 0; runde < 80; runde++) {
+    const G_aktuell = istGesamt + totalInvest.reduce((s, v) => s + v, 0);
+    const istAktuell = items.map((e, i) => e.effIst + totalInvest[i]);
+
+    // G muss mindestens so groß sein dass der übergewichtetste ETF auf Soll kommt
+    let G_ziel = G_aktuell;
+    items.forEach((e, i) => {
+      const G_needed = istAktuell[i] / e.soll_prozent;
+      if (G_needed > G_ziel) G_ziel = G_needed;
     });
-    return { balanced: false, items: result, budget };
-  } else {
-    // Berechne Minimum-Investment damit ALLE ETFs auf Soll kommen
-    // Richtige Formel: für jeden untergewichteten ETF i:
-    // (ist_i + x_i) / (G + X) = soll_i
-    // dabei: x_i = t_i * X (wobei t_i = soll_i für die untergewichteten)
-    // → x_i = soll_i * (G + X) - ist_i
-    // Summe aller x_i = X
-    // → löse nach X: X = [G * Σ(soll_i) - Σ(ist_i)] / [1 - Σ(soll_i für nur untergewichtete)]
-    // (Übergewichtete bekommen x_i = 0)
 
-    // Iterative Lösung (konvergiert schnell):
-    let G = istGesamt;
-    let X = 0;
-    for (let iter = 0; iter < 50; iter++) {
-      let newX = 0;
-      untergewichtet.forEach(e => {
-        const needed = e.soll_prozent * (G + X) - e.effIst;
-        if (needed > 0) newX += needed;
-      });
-      if (Math.abs(newX - X) < 0.01) break;
-      X = newX;
-    }
+    if (Math.abs(G_ziel - G_aktuell) < 0.05) break;
 
-    const result = items.map(e => {
-      if (e.untergewicht <= 0.01) return { ...e, invest: 0, neueIstPct: e.effIst / (G + X) * 100 };
-      const invest = Math.max(0, e.soll_prozent * (G + X) - e.effIst);
-      return { ...e, invest, neueIstPct: e.sollPct }; // nach Kauf exakt auf Soll
+    // Investiere für jeden untergewichteten ETF
+    items.forEach((e, i) => {
+      const neuesInvest = Math.max(0, e.soll_prozent * G_ziel - istAktuell[i]);
+      totalInvest[i] += neuesInvest;
     });
-    return { balanced: false, items: result, budget: X, totalNeeded: X };
   }
+
+  const X = totalInvest.reduce((s, v) => s + v, 0);
+  const G_final = istGesamt + X;
+
+  const result = items.map((e, i) => {
+    const istNeu = e.effIst + totalInvest[i];
+    const neueIstPct = istNeu / G_final * 100;
+    return { ...e, invest: totalInvest[i], neueIstPct };
+  });
+
+  return { balanced: false, items: result, totalNeeded: X, G: istGesamt, G_final };
 }
 
 function renderRebalance() {
@@ -957,22 +955,27 @@ function renderRebalance() {
     return;
   }
 
-  const istGesamt = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
+  const G = data.G;
+  const X = data.totalNeeded;
+  const G_final = data.G_final;
   const maxPct = Math.max(...data.items.map(e => Math.max(e.istPct, e.sollPct)));
 
   const rows = data.items.map(e => {
     const istBar = Math.min(e.istPct / maxPct * 100, 100);
     const sollBar = Math.min(e.sollPct / maxPct * 100, 100);
+    const neuBar = Math.min(e.neueIstPct / maxPct * 100, 100);
     const kauf = e.invest > 0.5;
+    const ueberGew = !kauf && e.istPct > e.sollPct + 0.05;
     return `<div class="reb-item">
-      <span class="reb-name">${e.name}</span>
-      <span style="font-size:11px;color:var(--text3)">${e.istPct.toFixed(1)}% → ${e.sollPct.toFixed(1)}%</span>
-      <span style="${kauf ? 'color:var(--accent);font-weight:600' : 'color:var(--text3)'}">${kauf ? '+' + fe(e.invest) : '✓'}</span>
+      <span class="reb-name">${e.name}${ueberGew ? ' <span style="font-size:9px;color:var(--accent3)">▼ verwässert sich</span>' : ''}</span>
+      <span style="font-size:11px;color:var(--text2)">${e.istPct.toFixed(1)}% → <span style="color:${kauf?'var(--accent)':'var(--text3)'}">${e.neueIstPct.toFixed(2)}%</span> <span style="color:var(--text3)">(Soll ${e.sollPct.toFixed(1)}%)</span></span>
+      <span style="${kauf ? 'color:var(--accent);font-weight:600' : 'color:var(--text3)'}">${kauf ? '+' + fe(e.invest) : '—'}</span>
       <div class="reb-bar-wrap">
         <div style="font-size:9px;color:var(--text3);min-width:28px">IST</div>
         <div class="reb-bar-bg">
           <div class="reb-bar-soll" style="width:${sollBar}%"></div>
           <div class="reb-bar-ist" style="width:${istBar}%"></div>
+          ${kauf ? `<div style="position:absolute;top:0;left:0;height:100%;width:${neuBar}%;background:rgba(0,212,170,.35);border-radius:3px;pointer-events:none"></div>` : ''}
         </div>
         <div style="font-size:9px;color:var(--accent);min-width:28px;text-align:right">SOLL</div>
       </div>
@@ -980,85 +983,84 @@ function renderRebalance() {
   }).join('');
 
   box.innerHTML = `
-    <div style="background:rgba(0,212,170,.06);border:1px solid rgba(0,212,170,.2);border-radius:6px;padding:12px 16px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <div>
-        <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px">Gesamtinvestment nötig</div>
-        <div style="font-family:var(--fd);font-size:22px;font-weight:700;color:var(--accent)">${fe(data.totalNeeded)}</div>
-        <div style="font-size:11px;color:var(--text2);margin-top:2px">damit alle ETFs exakt auf ihrer Soll-Gewichtung sind</div>
+    <div style="background:rgba(0,212,170,.06);border:1px solid rgba(0,212,170,.2);border-radius:6px;padding:12px 16px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+        <div>
+          <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:2px">Nötiges Investment (nur Käufe)</div>
+          <div style="font-family:var(--fd);font-size:22px;font-weight:700;color:var(--accent)">${fe(X)}</div>
+          <div style="font-size:11px;color:var(--text2);margin-top:4px">damit <strong style="color:var(--green)">alle ETFs</strong> exakt auf ihrer Soll-Gewichtung landen</div>
+        </div>
+        <div style="font-size:11px;color:var(--text3);text-align:right">
+          Depot jetzt: ${fe(G)}<br>
+          Depot danach: ${fe(G_final)}
+        </div>
       </div>
-      <div style="font-size:11px;color:var(--text3);text-align:right">
-        Aktuell: ${fe(istGesamt)}<br>
-        Nach Kauf: ${fe(istGesamt + data.totalNeeded)}
+      <div style="margin-top:10px;padding:8px 10px;background:rgba(0,0,0,.15);border-radius:5px;font-size:11px;color:var(--text3);line-height:1.6">
+        💡 Übergewichtete ETFs bekommen kein Geld – sie verwässern sich automatisch weil das Gesamtdepot wächst. Dieser Betrag entspricht dem, den du direkt im Tab <span style="color:var(--accent)">Einmalzahlung</span> eingeben kannst.
       </div>
     </div>
     <div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden">
       <div style="padding:8px 12px;background:var(--bg3);border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr auto auto;gap:12px;font-size:9px;text-transform:uppercase;letter-spacing:.07em;color:var(--text3)">
-        <span>ETF</span><span>IST → SOLL</span><span>Kaufen</span>
+        <span>ETF</span><span>IST → NEU (Soll)</span><span>Kaufen</span>
       </div>
       ${rows}
     </div>
-    <div style="font-size:10px;color:var(--text3);margin-top:10px;padding:0 4px">
-      ℹ️ Übergewichtete ETFs werden nicht bespielt (nur kaufen, kein Verkauf). Die Balken zeigen lila = IST, türkis = SOLL.
+    <div style="font-size:10px;color:var(--text3);margin-top:10px;padding:0 4px;line-height:1.5">
+      Balken: <span style="color:rgba(123,94,167,.8)">■</span> IST &nbsp; <span style="color:rgba(0,212,170,.4)">■</span> nach Kauf &nbsp; <span style="color:rgba(0,212,170,.25)">■</span> SOLL
     </div>`;
 }
 
 // ══════════════════════════════════════════
-// KERN: Betrag X optimal verteilen (Gruppen-bewusst)
-// Passive ETFs (Soll=0) werden gefiltert.
-// Aktive Gruppen-ETFs bekommen den effektiven IST-Wert
-// (eigener IST + passiver Partner-IST) als Basis.
-// Investiert wird immer nur in den aktiven ETF.
+// KERN: Betrag X optimal verteilen
+// Logik: G_neu = G + X (fest). Für jeden ETF i:
+//   invest_i = max(0, Soll_i * G_neu - effIst_i)
+// Übergewichtete (invest < 0) kriegen 0 und verwässern sich.
+// Die Summe der invest_i ≠ X weil übergewichtete 0 kriegen.
+// → Iterativ: entferne übergewichtete, skaliere restliche auf X.
 // ══════════════════════════════════════════
 function verteileOptimal(betrag, werte) {
   const alleEtfs = werte || etfs;
-  // Nur aktive ETFs (mit Soll > 0, nicht passiv)
   const W = alleEtfs.filter(e => (e.soll_prozent || 0) > 0 && !isPassivEtf(e));
   if (!W.length || betrag <= 0) return null;
 
-  // Gesamtes Depot (alle ETFs inkl. passive)
   const G = alleEtfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
-  const neuerGesamt = G + betrag;
+  const G_neu = G + betrag;
 
-  // Für jeden aktiven ETF: effektiver IST-Wert (inkl. Gruppen-Partner)
   const effIstMap = {};
   W.forEach(e => { effIstMap[e.id] = getEffektivenIst(e, alleEtfs); });
 
-  // Berechne ideale x_i = soll_i * neuerGesamt - effIst_i
-  // Iterativ: wenn negativ -> 0 setzen, skaliere verbleibende
-  let aktiv = W.map(e => ({ ...e }));
-  let fixes = {};
+  // Iterativ: entferne übergewichtete, skaliere auf betrag
+  let aktiv = W.map(e => e.id);
 
   for (let iter = 0; iter < 30; iter++) {
-    const vorschlag = {};
-    aktiv.forEach(e => {
-      vorschlag[e.id] = e.soll_prozent * neuerGesamt - effIstMap[e.id];
+    const invest = {};
+    aktiv.forEach(id => {
+      const e = W.find(x => x.id === id);
+      invest[id] = e.soll_prozent * G_neu - effIstMap[id];
     });
-    const neg = aktiv.filter(e => vorschlag[e.id] < 0);
-    if (!neg.length) break;
-    neg.forEach(e => { fixes[e.id] = 0; });
-    aktiv = aktiv.filter(e => vorschlag[e.id] >= 0);
+
+    const neg = aktiv.filter(id => invest[id] < 0);
+    if (!neg.length) {
+      const sumInvest = aktiv.reduce((s, id) => s + invest[id], 0);
+      const scale = sumInvest > 0 ? betrag / sumInvest : 0;
+      return W.map(e => {
+        const eff = effIstMap[e.id];
+        const istPctVorher = G > 0 ? eff / G * 100 : 0;
+        const inv = aktiv.includes(e.id) ? Math.max(0, invest[e.id]) * scale : 0;
+        const istPctNachher = G_neu > 0 ? (eff + inv) / G_neu * 100 : 0;
+        return { ...e, invest: inv, istPctVorher, istPctNachher, sollPct: e.soll_prozent * 100 };
+      });
+    }
+    neg.forEach(id => { aktiv = aktiv.filter(x => x !== id); });
     if (!aktiv.length) break;
   }
 
-  const aktivInvest = {};
-  aktiv.forEach(e => {
-    aktivInvest[e.id] = e.soll_prozent * neuerGesamt - effIstMap[e.id];
-  });
-
-  const sumAktiv = aktiv.reduce((s, e) => s + Math.max(0, aktivInvest[e.id]), 0);
-  const scale = sumAktiv > 0 ? betrag / sumAktiv : 0;
-
-  return W.map(e => {
-    const effIstVorher = effIstMap[e.id];
-    const istPctVorher = G > 0 ? effIstVorher / G * 100 : 0;
-    const sollPct = e.soll_prozent * 100;
-    const invest = fixes[e.id] !== undefined
-      ? 0
-      : Math.max(0, aktivInvest[e.id] || 0) * scale;
-    const effIstNachher = effIstVorher + invest;
-    const istPctNachher = neuerGesamt > 0 ? effIstNachher / neuerGesamt * 100 : sollPct;
-    return { ...e, invest, istPctVorher, istPctNachher, sollPct };
-  });
+  return W.map(e => ({
+    ...e, invest: 0,
+    istPctVorher: G > 0 ? effIstMap[e.id] / G * 100 : 0,
+    istPctNachher: G_neu > 0 ? effIstMap[e.id] / G_neu * 100 : 0,
+    sollPct: e.soll_prozent * 100
+  }));
 }
 
 // ══════════════════════════════════════════
@@ -1072,24 +1074,30 @@ function calcEinmal() {
   const items = verteileOptimal(betrag);
   if (!items) { box.innerHTML = '<div style="color:var(--text3);padding:10px;font-size:12px">Bitte zuerst ETFs mit Soll-% anlegen.</div>'; return; }
 
-  const G = etfs.filter(e => e.soll_prozent > 0).reduce((s, e) => s + (e.ist_wert || 0), 0);
+  const G = etfs.reduce((s, e) => s + (e.ist_wert || 0), 0);
+  const G_neu = G + betrag;
+  const kaufend = items.filter(e => e.invest > 0.01);
+  const verwassernd = items.filter(e => e.invest < 0.01 && e.istPctVorher > e.sollPct + 0.05);
 
-  // Alle ETFs anzeigen, sortiert nach Investitionsbetrag absteigend
   const sorted = [...items].sort((a, b) => b.invest - a.invest);
 
   const rows = sorted.map(e => {
-    const anteil = betrag > 0 ? e.invest / betrag * 100 : 0;
+    const anteil = betrag > 0 && e.invest > 0 ? e.invest / betrag * 100 : 0;
     const kauf = e.invest > 0.01;
+    const vw = !kauf && e.istPctVorher > e.sollPct + 0.05;
     return `<div class="inv-row">
-      <span style="color:${kauf ? 'var(--text)' : 'var(--text3)'}">${e.name}</span>
-      <span style="font-size:10px;color:var(--text3)">${e.istPctVorher.toFixed(1)}% → <span style="color:var(--accent)">${e.istPctNachher.toFixed(1)}%</span> <span style="color:var(--green)">(Soll:${e.sollPct.toFixed(1)}%)</span></span>
-      <span style="color:${kauf ? 'var(--accent)' : 'var(--text3)'};font-weight:${kauf ? '600' : '400'}">${kauf ? fe(e.invest) : '—'}</span>
+      <span style="color:${kauf ? 'var(--text)' : 'var(--text3)'}">${e.name}${vw ? ' <span style="font-size:9px;color:var(--accent3)">▼</span>' : ''}</span>
+      <span style="font-size:10px;color:var(--text3)">${e.istPctVorher.toFixed(1)}% → <span style="color:${kauf?'var(--accent)':'var(--text3)'}">${e.istPctNachher.toFixed(2)}%</span> <span style="color:var(--text3)">(Soll:${e.sollPct.toFixed(1)}%)</span></span>
+      <span style="color:${kauf ? 'var(--accent)' : 'var(--text3)'};font-weight:${kauf ? '600' : '400'}">${kauf ? fe(e.invest) : vw ? '— verwässert' : '✓'}</span>
       <span style="color:var(--text3);font-size:10px">${kauf ? anteil.toFixed(1)+'%' : ''}</span>
     </div>`;
   }).join('');
 
+  const vwInfo = verwassernd.length ? `<div style="font-size:10px;color:var(--accent3);margin-bottom:8px;padding:6px 8px;background:rgba(240,165,0,.06);border-radius:4px;border:1px solid rgba(240,165,0,.15)">▼ ${verwassernd.length} ETF${verwassernd.length>1?'s':''} übergewichtet – verwässern sich durch das wachsende Depot automatisch Richtung Soll</div>` : '';
+
   box.innerHTML = `<div class="inv-result">
-    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:10px">Optimale Aufteilung von ${fe(betrag)} — alle ${items.length} ETFs</div>
+    <div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.07em;margin-bottom:8px">Optimale Aufteilung von ${fe(betrag)} auf ${kaufend.length} von ${items.length} ETFs</div>
+    ${vwInfo}
     <div style="display:grid;grid-template-columns:1fr auto auto auto;gap:4px;font-size:9px;color:var(--text3);margin-bottom:6px;padding:0 2px;text-transform:uppercase;letter-spacing:.05em">
       <span>ETF</span><span>IST → NEU (Soll)</span><span>Invest</span><span>Anteil</span>
     </div>
@@ -1099,9 +1107,6 @@ function calcEinmal() {
       <span></span>
       <span style="color:var(--accent);font-family:var(--fd);font-size:15px;font-weight:700">${fe(betrag)}</span>
       <span></span>
-    </div>
-    <div style="font-size:10px;color:var(--text3);margin-top:8px;line-height:1.5">
-      Jeder ETF erhält: <code style="color:var(--accent2)">x_i = Soll_i × (G+X) − IST_i</code>. ETFs die schon übergewichtet sind bekommen 0 (kein Verkauf).
     </div>
   </div>`;
 }
